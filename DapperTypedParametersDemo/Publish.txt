@@ -1,0 +1,15 @@
+﻿To publish .Net core 1.1 exe for win10-x64 run following commands on command line.
+
+dotnet restore
+dotnet publish -c release -r win10-x64
+
+But first, make sure the RuntimeIdentifiers node is populated within PropertyGroup in .csproj file.
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>exe</OutputType>
+    <TargetFramework>netcoreapp1.1</TargetFramework>
+    <RuntimeIdentifiers>win10-x64</RuntimeIdentifiers>
+    <ApplicationIcon />
+    <OutputTypeEx>exe</OutputTypeEx>
+    <StartupObject />
+  </PropertyGroup>
