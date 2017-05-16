@@ -23,14 +23,13 @@ namespace DapperTypedParametersDemo
 
                 EmployeeRepository.CreateTable(conn);
 
-                var benchmark = new Benchmark(conn, 100000);
+                var benchmark = new Benchmark(conn, 100_000);
                 var results = benchmark.Run();
 
+                WriteLine($"{"Test",-20} {"Elapsed Time", -20} {"Iterations", -20}");
                 foreach (var result in results)
                 {
-                    WriteLine($"{result.name} total time/t: {result.elapsed.Seconds,3}s ");
-                    WriteLine($"{result.name} iterations/t: {result.iterations}");
-                    WriteLine($"{result.name} average time/t: {result.elapsed.Seconds / result.iterations,3}s");
+                    WriteLine($"{result.name, -20} {result.elapsed.Seconds + "s",-20} {result.iterations, -20}");
                 }
                 EmployeeRepository.DropTable(conn);
             }
@@ -54,7 +53,7 @@ namespace DapperTypedParametersDemo
     {
         readonly SqlConnection conn;
         readonly int iterations;
-        
+
         public Benchmark(SqlConnection conn, int iterations)
         {
             this.conn = conn;
@@ -65,41 +64,65 @@ namespace DapperTypedParametersDemo
         {
             var repository = new EmployeeRepository(conn);
 
-            yield return Run(emp =>
-            {
-                repository.AddSimple(emp);
-                ////Get the employees from db
-                //foreach (var employeeInDb in repository.GetAll())
-                //    WriteLine(employeeInDb);
-            }, nameof(repository.AddSimple), iterations);
+            yield return Run(emp => repository.AddSimple(emp), 
+                () => EmployeeRepository.TruncateTable(conn), 
+                iterations => GenerateEmployees(iterations), 
+                nameof(repository.AddSimple), 
+                iterations);
 
-            yield return Run(emp =>
-            {
-                repository.AddComplex(emp);
-                ////Get the employees from db
-                //foreach (var employeeInDb in repository.GetAll())
-                //    WriteLine(employeeInDb);
-            }, nameof(repository.AddComplex), iterations);
+            yield return Run(emp => repository.UpdateSimple(emp), 
+                () => { }, 
+                iterations => ModifiedEmployees(iterations), 
+                nameof(repository.UpdateSimple), 
+                iterations);
+
+            yield return Run(emp => repository.AddComplex(emp), 
+                () => EmployeeRepository.TruncateTable(conn), 
+                iterations => GenerateEmployees(iterations), 
+                nameof(repository.AddComplex), 
+                iterations);
+
+            yield return Run(emp =>repository.UpdateComplex(emp), 
+                () => { }, 
+                iterations => ModifiedEmployees(iterations), 
+                nameof(repository.UpdateComplex), 
+                iterations);
         }
 
-        public (string name, int iterations, TimeSpan elapsed) Run(Action<Employee> action, string mainActionName, int iterations)
+        public (string name, int iterations, TimeSpan elapsed) Run(Action<Employee> mainAction,
+            Action resetAction,
+            Func<int, IEnumerable<Employee>> dataGenerator,
+            string mainActionName,
+            int iterations)
         {
-            var employees = GenerateEmployees(iterations);
+            var employees = dataGenerator(iterations);
 
             //Run actions on some employees to warmup JIT and system
             foreach (var e in employees.Take(1000))
-                action(e);
-            EmployeeRepository.TruncateTable(conn);
+                mainAction(e);
+            resetAction();
 
             GC.Collect();
             GC.WaitForPendingFinalizers();
 
             var timer = Stopwatch.StartNew();
             foreach (var e in employees)
-                action(e);
+                mainAction(e);
             timer.Stop();
 
+            //PrintAllEmployeesinDb();
+
             return (mainActionName, employees.Count(), timer.Elapsed);
+        }
+
+        void PrintAllEmployeesinDb()
+        {
+            var repository = new EmployeeRepository(conn);
+            //Get the employees from db
+            foreach (var employeeInDb in repository.GetAll())
+            {
+                WriteLine(employeeInDb);
+            }
         }
 
         private IEnumerable<Employee> GenerateEmployees(int iterations)
@@ -117,10 +140,25 @@ namespace DapperTypedParametersDemo
                     DateVested = alice.DateVested.AddYears(1).AddDays(i % 1000)
                 };
         }
+
+        private IEnumerable<Employee> ModifiedEmployees(int iterations)
+        {
+            var repository = new EmployeeRepository(conn);
+            foreach (var e in repository.GetAll())
+            {
+                e.FirstName = Name.First();
+                e.LastName = Name.Last();
+                e.DateOfBirth = e.DateOfBirth.AddDays(-7);
+                e.DateVested = e.DateVested.AddDays(-7);
+
+                yield return e;
+            }
+        }
     }
 
     public class EmployeeRepository
     {
+
         readonly SqlConnection conn;
         public EmployeeRepository(SqlConnection conn)
         {
@@ -148,7 +186,7 @@ namespace DapperTypedParametersDemo
 
             return conn.Query<int>(sql, args).SingleOrDefault();
         }
-        
+
         //Nicer syntax but may be slower and higher CPU because of implicit conversion of .Net string to nvarchar to varchar (on server) and datetime to sql datetime then to datetime2.
         public int AddSimple(Employee employee)
         {
@@ -158,6 +196,28 @@ namespace DapperTypedParametersDemo
             return conn.Query<int>(sql, employee).SingleOrDefault();
         }
 
+        public int UpdateComplex(Employee employee)
+        {
+            var sql = $"update Employees set colFirstName = @{nameof(Employee.FirstName)}, colLastName = @{nameof(Employee.LastName)}, DateOfBirth = @{nameof(Employee.DateOfBirth)}, DateVested = @{nameof(Employee.DateVested)} " +
+                $"where Id = @{nameof(Employee.Id)};";
+            var args = new DynamicParameters();
+            args.Add(nameof(Employee.FirstName), employee.FirstName, size: 30); //.Net string type defaults DbTpye.String which matches Sql nvarchar
+            args.Add(nameof(Employee.LastName), employee.LastName, DbType.AnsiString, size: 30);
+            args.Add(nameof(Employee.DateOfBirth), employee.DateOfBirth); //.Net DateTime type defaults to Sql datetime 
+            args.Add(nameof(Employee.DateVested), employee.DateVested, DbType.DateTime2);
+            args.Add(nameof(Employee.Id), employee.Id);
+
+            return conn.Execute(sql, args);
+        }
+
+
+        public int UpdateSimple(Employee employee)
+        {
+            var sql = $"update Employees set colFirstName = @{nameof(Employee.FirstName)}, colLastName = @{nameof(Employee.LastName)}, DateOfBirth = @{nameof(Employee.DateOfBirth)}, DateVested = @{nameof(Employee.DateVested)} " +
+                $"where Id = @{nameof(Employee.Id)};";
+
+            return conn.Execute(sql, employee);
+        }
         //DDL methods definitely do not belong in a repository
         public static void CreateTable(SqlConnection conn)
         {
